@@ -1,0 +1,121 @@
+import pygame
+import sqlite3
+import sys
+
+# --- Datenbank Setup ---
+def init_db():
+    # Verbindung zur SQLite-Datenbank herstellen (Datei: highscore.db)
+    conn = sqlite3.connect("highscore.db")
+    c = conn.cursor()
+    # Tabelle "highscores" erstellen, falls sie nicht existiert
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS highscores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_name TEXT NOT NULL,
+            score INTEGER NOT NULL
+        )
+    ''')
+    conn.commit()
+    return conn, c
+
+def update_highscores(conn, c, player_name, score):
+    # Neuen Score in die Tabelle einfügen
+    c.execute('INSERT INTO highscores (player_name, score) VALUES (?, ?)', (player_name, score))
+    conn.commit()
+
+    # Anzahl der Scores zählen
+    c.execute('SELECT COUNT(*) FROM highscores')
+    count = c.fetchone()[0]
+
+    # Wenn mehr als 5 Scores gespeichert sind, die niedrigsten löschen
+    if count > 5:
+        c.execute('''
+            DELETE FROM highscores
+            WHERE id IN (
+                SELECT id FROM highscores
+                ORDER BY score ASC, id ASC
+                LIMIT ?
+            )
+        ''', (count - 5,))
+        conn.commit()
+
+def get_top_highscores(c, limit=5):
+    # Top Scores absteigend sortiert auslesen (höchster Score zuerst)
+    c.execute('SELECT player_name, score FROM highscores ORDER BY score DESC, id ASC LIMIT ?', (limit,))
+    return c.fetchall()
+
+# --- Pygame Setup ---
+pygame.init()
+screen = pygame.display.set_mode((640, 480))
+pygame.display.set_caption("Jump and Run - Top 5 Highscores")
+
+font = pygame.font.SysFont(None, 36)
+small_font = pygame.font.SysFont(None, 24)
+
+# Verbindung zur DB aufbauen
+conn, c = init_db()
+
+# Aktuelle Top 5 Scores laden
+top_scores = get_top_highscores(c)
+
+player_score = 0
+player_name = "Player1"  # Kann erweitert werden, z.B. Eingabefeld
+
+clock = pygame.time.Clock()
+running = True
+
+while running:
+    screen.fill((30, 30, 30))
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            # Score speichern beim Spielende
+            update_highscores(conn, c, player_name, player_score)
+            running = False
+
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_SPACE:
+                player_score += 10
+                # Score automatisch speichern
+                update_highscores(conn, c, player_name, player_score)
+                top_scores = get_top_highscores(c)
+                print(f"Score erhöht auf {player_score} und gespeichert")
+
+            if event.key == pygame.K_m:
+                player_score -= 10
+                player_score = max(player_score, 0)  # Score nicht negativ
+                # Score automatisch speichern
+                update_highscores(conn, c, player_name, player_score)
+                top_scores = get_top_highscores(c)
+                print(f"Score verringert auf {player_score} und gespeichert")
+
+    # Score anzeigen
+    score_text = font.render(f"Score: {player_score}", True, (255, 255, 255))
+    screen.blit(score_text, (20, 20))
+
+    # Highscore Überschrift
+    hs_header = font.render("Top 5 Highscores:", True, (255, 215, 0))
+    screen.blit(hs_header, (20, 60))
+
+    # Top 5 Highscores anzeigen
+    y = 100
+    if top_scores:
+        for i, (name, score) in enumerate(top_scores, start=1):
+            hs_text = small_font.render(f"{i}. {name} - {score}", True, (255, 215, 0))
+            screen.blit(hs_text, (40, y))
+            y += 30
+    else:
+        no_score_text = small_font.render("Noch keine Highscores vorhanden.", True, (200, 200, 200))
+        screen.blit(no_score_text, (40, y))
+
+    # Steuerhinweise anzeigen
+    info_text = small_font.render("Space: +10 Punkte | M: -10 Punkte | Schließen: Score speichern", True, (200, 200, 200))
+    screen.blit(info_text, (20, 440))
+
+    pygame.display.flip()
+    clock.tick(30)
+
+# Spiel und DB sauber schließen
+pygame.quit()
+conn.close()
+sys.exit()
