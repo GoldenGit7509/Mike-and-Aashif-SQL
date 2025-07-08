@@ -4,7 +4,11 @@ import random
 pygame.init()
 WIDTH, HEIGHT = 1000, 800
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("best athletism")
+pygame.display.set_caption("The best athletes")
+#Sounds
+cheer_sound = pygame.mixer.Sound("crowd_cheering.mp3")
+cheer_sound.set_volume(0.3) 
+cheer_sound.play(-1)  
 
 # Farben
 WHITE = (255, 255, 255)
@@ -22,7 +26,7 @@ score_timer = 0
 font = pygame.font.SysFont(None, 40)
 
 # Spieler
-spieler = pygame.Rect(100, 710, 40, 40)
+spieler = pygame.Rect(100, 670, 40, 80)
 is_jumping = False
 jump_speed = 15
 gravity = 1
