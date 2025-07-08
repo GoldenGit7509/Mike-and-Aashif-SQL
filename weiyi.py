@@ -106,6 +106,9 @@ while running:
         # Spieler springt
         if keys[pygame.K_SPACE] and not is_jumping:
             is_jumping = True
+            jump_sound = pygame.mixer.Sound("jumpSound.mp3")
+            jump_sound.set_volume(10) 
+            jump_sound.play(0)
             velocity_y = -jump_speed
 
         if is_jumping:
@@ -136,7 +139,11 @@ while running:
             if spieler.colliderect(obstacle):
                 game_over = True
                 print("Game Over! Dein Score:", score)
+                cheer_sound = pygame.mixer.Sound("losing.wav")
+                cheer_sound.set_volume(10) 
+                cheer_sound.play(0)
                 save_score_insert(conn, c, score)
+                
 
         # Punkte pro Sekunde erhöhen
         score_timer += clock.get_time()
@@ -150,6 +157,7 @@ while running:
     pygame.draw.rect(screen, BLUE, spieler)
 
     if game_over:
+   
         game_over_text = font.render("Game Over! Drücke 'R' zum Neustarten.", True, RED)
         screen.blit(game_over_text, (WIDTH // 2 - game_over_text.get_width() // 2, HEIGHT // 2))
 
