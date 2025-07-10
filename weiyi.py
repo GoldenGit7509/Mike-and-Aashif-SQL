@@ -1,121 +1,249 @@
 import pygame
+import random
 import sqlite3
-import sys
 
-# --- Datenbank Setup ---
+# -------- Datenbank Setup --------
+score_place_names = ["Score1", "Score2", "Score3", "Score4", "Score5"]
+
 def init_db():
-    # Verbindung zur SQLite-Datenbank herstellen (Datei: highscore.db)
+    """
+    Initialisiert die SQLite-Datenbank für Highscores.
+    Erzeugt Tabelle, falls nicht vorhanden, und füllt Platzhalter ein.
+    """
     conn = sqlite3.connect("highscore.db")
     c = conn.cursor()
-    # Tabelle "highscores" erstellen, falls sie nicht existiert
-    c.execute('''
+    c.execute('''   
         CREATE TABLE IF NOT EXISTS highscores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            player_name TEXT NOT NULL,
+            player_name TEXT PRIMARY KEY,
             score INTEGER NOT NULL
         )
     ''')
+    # Initialeinträge anlegen, falls noch nicht vorhanden
+    for name in score_place_names:
+        c.execute('SELECT player_name FROM highscores WHERE player_name = ?', (name,))
+        if not c.fetchone():
+            c.execute('INSERT INTO highscores (player_name, score) VALUES (?, ?)', (name, 0))
     conn.commit()
     return conn, c
 
-def update_highscores(conn, c, player_name, score):
-    # Neuen Score in die Tabelle einfügen
-    c.execute('INSERT INTO highscores (player_name, score) VALUES (?, ?)', (player_name, score))
+def get_all_scores(c):
+    """
+    Holt alle Highscores aus der Datenbank,
+    sortiert sie absteigend nach Score,
+    gibt die Top 5 zurück.
+    """
+    c.execute('SELECT player_name, score FROM highscores')
+    results = c.fetchall()
+    sorted_results = sorted(results, key=lambda x: x[1], reverse=True)
+    while len(sorted_results) < 5:
+        sorted_results.append(("ScoreX", 0))  # Platzhalter wenn weniger als 5 Scores
+    return sorted_results[:5]
+
+def save_score_insert(conn, c, new_score):
+    """
+    Fügt einen neuen Score in die Top 5 ein,
+    falls dieser höher als der niedrigste ist.
+    Überschreibt dabei den niedrigsten Score.
+    """
+    scores = get_all_scores(c)
+    if new_score <= scores[-1][1]:
+        print(f"Score {new_score} nicht hoch genug für Top 5.")
+        return
+    inserted = False
+    new_scores = []
+    for pname, pscore in scores:
+        if not inserted and new_score > pscore:
+            new_scores.append(("Score1", new_score))  # Neuer Score an richtiger Stelle einfügen
+            inserted = True
+        if len(new_scores) < 5:
+            new_scores.append((pname, pscore))
+    new_scores = new_scores[:5]  # Nur Top 5 behalten
+    for i, (_, score_val) in enumerate(new_scores):
+        fixed_name = score_place_names[i]  # Feste Namen der Scoreplätze
+        c.execute('UPDATE highscores SET score = ? WHERE player_name = ?', (score_val, fixed_name))
     conn.commit()
+    print(f"Score {new_score} in Top 5 gespeichert.")
 
-    # Anzahl der Scores zählen
-    c.execute('SELECT COUNT(*) FROM highscores')
-    count = c.fetchone()[0]
+# -------- Spiel Setup --------
+pygame.init()  # Pygame initialisieren
 
-    # Wenn mehr als 5 Scores gespeichert sind, die niedrigsten löschen
-    if count > 5:
-        c.execute('''
-            DELETE FROM highscores
-            WHERE id IN (
-                SELECT id FROM highscores
-                ORDER BY score ASC, id ASC
-                LIMIT ?
-            )
-        ''', (count - 5,))
-        conn.commit()
+WIDTH, HEIGHT = 1000, 800  # Fenstergröße
 
-def get_top_highscores(c, limit=5):
-    # Top Scores absteigend sortiert auslesen (höchster Score zuerst)
-    c.execute('SELECT player_name, score FROM highscores ORDER BY score DESC, id ASC LIMIT ?', (limit,))
-    return c.fetchall()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))  # Fenster erzeugen
+pygame.display.set_caption("Hürdenlauf 1")  # Fenstertitel
 
-# --- Pygame Setup ---
-pygame.init()
-screen = pygame.display.set_mode((640, 480))
-pygame.display.set_caption("Jump and Run - Top 5 Highscores")
+# Hintergrundbild laden und auf Fenstergröße skalieren mit Fehlerbehandlung
+try:
+    background_img = pygame.image.load("scene-running-track.jpg").convert()
+    background_img = pygame.transform.scale(background_img, (WIDTH, HEIGHT))
+except Exception as e:
+    print("Fehler beim Laden des Hintergrundbildes:", e)
+    background_img = None  # Kein Bild vorhanden
 
-font = pygame.font.SysFont(None, 36)
-small_font = pygame.font.SysFont(None, 24)
+# Hindernis-Bild laden und skalieren mit Fehlerbehandlung
+try:
+    obstacle_img = pygame.image.load("pixilart-drawing.png").convert_alpha()
+    obstacle_img = pygame.transform.scale(obstacle_img, (140, 140))
+except Exception as e:
+    print("Fehler beim Laden des Hindernisbildes:", e)
+    obstacle_img = None
 
-# Verbindung zur DB aufbauen
+# Farben als RGB-Tupel
+BLACK = (0, 0, 0)
+BLUE = (0, 0, 255)
+
+clock = pygame.time.Clock()  # Uhr für Framerate
+fps = 60  # Ziel-Framerate
+font = pygame.font.SysFont(None, 40)  # Schriftart und Größe
+
+boden_height = 50  # Höhe des Bodens am unteren Bildschirmrand
+jump_speed = 15   # Absprunggeschwindigkeit
+gravity = 1       # Schwerkraft, beschleunigt Fall nach unten
+
+def draw_gradient_rect(surface, rect, start_color, end_color):
+    """
+    Zeichnet einen horizontalen Farbverlauf (Gradient) in einem Rechteck.
+    :param surface: Zieloberfläche (Surface)
+    :param rect: Tuple (x, y, Breite, Höhe)
+    :param start_color: RGB Startfarbe (links)
+    :param end_color: RGB Endfarbe (rechts)
+    """
+    x, y, w, h = rect
+    for i in range(w):
+        ratio = i / w  # Verhältnis von 0 bis 1 quer durchs Rechteck
+        r = int(start_color[0] + (end_color[0] - start_color[0]) * ratio)
+        g = int(start_color[1] + (end_color[1] - start_color[1]) * ratio)
+        b = int(start_color[2] + (end_color[2] - start_color[2]) * ratio)
+        pygame.draw.line(surface, (r, g, b), (x + i, y), (x + i, y + h - 1))
+
+def reset_game():
+    """
+    Setzt den Spielzustand zurück für einen Neustart.
+    Erzeugt Spieler, Hindernisse und setzt Variablen auf Anfangswerte.
+    """
+    spieler = pygame.Rect(100, HEIGHT - boden_height - 40, 40, 40)  # Spieler-Rechteck (Position und Größe)
+    is_jumping = False  # Spieler springt gerade nicht
+    velocity_y = 0      # Vertikale Geschwindigkeit
+    obstacles = []      # Liste der Hindernisse
+    obstacle_timer = 0  # Timer für neues Hindernis
+    score = 0           # Punktestand
+    score_timer = 0     # Timer für Punktezählung
+    speedineeedthis = 10  # Geschwindigkeit der Hindernisse (horizontal)
+    game_over = False   # Spiel läuft noch
+    return spieler, is_jumping, velocity_y, obstacles, obstacle_timer, score, score_timer, speedineeedthis, game_over
+
+# Initiale Spielzustände setzen
+spieler, is_jumping, velocity_y, obstacles, obstacle_timer, score, score_timer, speedineeedthis, game_over = reset_game()
+
+# Datenbankverbindung und Cursor holen
 conn, c = init_db()
 
-# Aktuelle Top 5 Scores laden
-top_scores = get_top_highscores(c)
+# Hintergrundmusik laden und starten
+try:
+    pygame.mixer.music.load("retro-game-arcade-236133.mp3")
+    pygame.mixer.music.set_volume(0.8)  # Lautstärke anpassen (0 bis 1)
+    pygame.mixer.music.play(-1)  # Endlosschleife
+except Exception as e:
+    print("Fehler beim Laden oder Abspielen der Musik:", e)
 
-player_score = 0
-player_name = "Player1"  # Kann erweitert werden, z.B. Eingabefeld
-
-clock = pygame.time.Clock()
 running = True
-
 while running:
-    screen.fill((30, 30, 30))
+    # Hintergrund zeichnen (Bild oder Fallback-Farbe)
+    if background_img:
+        screen.blit(background_img, (0, 0))
+    else:
+        screen.fill((135, 206, 235))  # Himmelblau als Fallback-Hintergrund
 
+    # Boden mit Farbverlauf von Rot zu Orange zeichnen
+    draw_gradient_rect(screen, (0, HEIGHT - boden_height, WIDTH, boden_height), (255, 0, 0), (255, 165, 0))
+
+    # Ereignisse abfragen (z.B. Tastendrücke oder Fenster schließen)
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            # Score speichern beim Spielende
-            update_highscores(conn, c, player_name, player_score)
-            running = False
+            running = False  # Programm beenden
 
         if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_SPACE:
-                player_score += 10
-                # Score automatisch speichern
-                update_highscores(conn, c, player_name, player_score)
-                top_scores = get_top_highscores(c)
-                print(f"Score erhöht auf {player_score} und gespeichert")
+            # Neustart wenn 'R' gedrückt und Spiel vorbei
+            if event.key == pygame.K_r and game_over:
+                spieler, is_jumping, velocity_y, obstacles, obstacle_timer, score, score_timer, speedineeedthis, game_over = reset_game()
 
-            if event.key == pygame.K_m:
-                player_score -= 10
-                player_score = max(player_score, 0)  # Score nicht negativ
-                # Score automatisch speichern
-                update_highscores(conn, c, player_name, player_score)
-                top_scores = get_top_highscores(c)
-                print(f"Score verringert auf {player_score} und gespeichert")
+    keys = pygame.key.get_pressed()  # Abfrage, welche Tasten aktuell gedrückt sind
 
-    # Score anzeigen
-    score_text = font.render(f"Score: {player_score}", True, (255, 255, 255))
-    screen.blit(score_text, (20, 20))
+    if not game_over:
+        # Springen, wenn Leertaste gedrückt & Spieler gerade nicht springt
+        if keys[pygame.K_SPACE] and not is_jumping:
+            is_jumping = True
+            try:
+                jump_sound = pygame.mixer.Sound("jumpSound.mp3")  # Sprung-Sound laden
+                jump_sound.set_volume(1.0)  # Lautstärke setzen (0-1)
+                jump_sound.play(0)         # Abspielen
+            except Exception as e:
+                print("Fehler beim Abspielen des Sprung-Sounds:", e)
+            velocity_y = -jump_speed   # Impuls nach oben
 
-    # Highscore Überschrift
-    hs_header = font.render("Top 5 Highscores:", True, (255, 215, 0))
-    screen.blit(hs_header, (20, 60))
+        # Spielerposition bei Sprung aktualisieren
+        if is_jumping:
+            spieler.y += velocity_y  # Vertikal verschieben
+            velocity_y += gravity    # Schwerkraft addieren (Fall beschleunigen)
+            # Spieler landet auf Boden (keine Überhöhung)
+            if spieler.y >= HEIGHT - boden_height - spieler.height:
+                spieler.y = HEIGHT - boden_height - spieler.height
+                is_jumping = False
+                velocity_y = 0
 
-    # Top 5 Highscores anzeigen
-    y = 100
-    if top_scores:
-        for i, (name, score) in enumerate(top_scores, start=1):
-            hs_text = small_font.render(f"{i}. {name} - {score}", True, (255, 215, 0))
-            screen.blit(hs_text, (40, y))
-            y += 30
-    else:
-        no_score_text = small_font.render("Noch keine Highscores vorhanden.", True, (200, 200, 200))
-        screen.blit(no_score_text, (40, y))
+        # Timer hochzählen und bei >1000ms (1 Sek) neues Hindernis erzeugen
+        obstacle_timer += clock.get_time()
+        if obstacle_timer > 1000:
+            obstacle_timer = 0
+            # Hindernis erzeugen ganz rechts, auf Höhe des Bodens minus Spielerhöhe (damit es am Boden steht)
+            obstacles.append(pygame.Rect(WIDTH, HEIGHT - boden_height - 40, 40, 40))
 
-    # Steuerhinweise anzeigen
-    info_text = small_font.render("Space: +10 Punkte | M: -10 Punkte | Schließen: Score speichern", True, (200, 200, 200))
-    screen.blit(info_text, (20, 440))
+        # Alle Hindernisse verschieben und zeichnen
+        for obstacle in obstacles[:]:  # Kopie der Liste für sicheres Entfernen
+            obstacle.x -= speedineeedthis  # Hindernis bewegt sich nach links
+            if obstacle_img:
+                screen.blit(obstacle_img, obstacle.topleft)  # Bild zeichnen an Hindernis-Position
+            else:
+                pygame.draw.rect(screen, (255, 0, 0), obstacle)  # Rotes Rechteck als Ersatz
+            if obstacle.right < 0:  # Hindernis außerhalb links entfernen
+                obstacles.remove(obstacle)
+                speedineeedthis = random.randint(20, 35)  # Neue Geschwindigkeit zufällig setzen
 
+        # Kollisionsprüfung zwischen Spieler und Hindernissen
+        for obstacle in obstacles:
+            if spieler.colliderect(obstacle):
+                game_over = True  # Spiel ist vorbei
+                print("Game Over! Dein Score:", score)
+                try:
+                    cheer_sound = pygame.mixer.Sound("losing.wav")  # Game-over-Sound
+                    cheer_sound.set_volume(0.5)
+                    cheer_sound.play(0)
+                except Exception as e:
+                    print("Fehler beim Abspielen des Game-Over-Sounds:", e)
+                save_score_insert(conn, c, score)  # Score speichern
+
+        # Score jede Sekunde erhöhen
+        score_timer += clock.get_time()
+        if score_timer >= 1000:
+            score += 1
+            score_timer = 0
+
+    # Score-Text rendern und anzeigen
+    score_text = font.render(f"Score: {score}", True, BLACK)
+    screen.blit(score_text, (10, 10))
+
+    # Spieler-Quadrat zeichnen
+    pygame.draw.rect(screen, BLUE, spieler)
+
+    # Game-Over Text anzeigen
+    if game_over:
+        game_over_text = font.render("Game Over! Drücke 'R' zum Neustarten.", True, (255, 0, 0))
+        screen.blit(game_over_text, (WIDTH // 2 - game_over_text.get_width() // 2, HEIGHT // 2))
+
+    # Bildschirm aktualisieren
     pygame.display.flip()
-    clock.tick(30)
+    clock.tick(fps)  # Auf Ziel-FPS warten
 
-# Spiel und DB sauber schließen
+# Pygame beenden und Datenbankverbindung schließen
 pygame.quit()
 conn.close()
-sys.exit()
